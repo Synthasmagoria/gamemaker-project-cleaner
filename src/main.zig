@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 
 const char = u8;
 
-fn prints(str: []const char) void {
+fn prints(str: anytype) void {
     std.debug.print("{s}\n", .{str});
 }
 
@@ -114,45 +114,100 @@ const OpenProjectDirectoryError = error{
     NoDirnameAbs,
     UnknownAbs,
     NoDirname,
-    Unknown
+    Unknown,
+    NotYyp,
 };
-pub fn openProjectDirectory(path: []const char) !fs.Dir {
+const OpenProjectDirectoryResult = struct {
+    directoryPath: []const char,
+    projectFileName: []const char,
+    pathWasFilepath: bool,
+};
+pub fn getProjectDirectory(alloc: Allocator, path: []const char) !OpenProjectDirectoryResult {
     if (fs.path.isAbsolute(path)) {
         switch (try pathGetTypeAbs(path)) {
             .Directory => {
-                return try fs.openDirAbsolute(path, .{.access_sub_paths = true, .iterate = true});
+                return .{
+                    .projectFileName = try directoryFindProjectFilename(alloc, path),
+                    .directoryPath = path,
+                    .pathWasFilepath = false};
             },
             .File => {
+                if (!mem.eql(u8, fs.path.extension(path), ".yyp")) {
+                    return OpenProjectDirectoryError.NotYyp;
+                }
                 if (fs.path.dirname(path)) |dirname| {
-                    return try fs.openDirAbsolute(dirname, .{.access_sub_paths = true, .iterate = true});
+                    return .{
+                        .projectFileName = fs.path.basename(path),
+                        .directoryPath = dirname,
+                        .pathWasFilepath = true};
                 } else {
                     return OpenProjectDirectoryError.NoDirnameAbs;
                 }
             },
             .Unknown => {
-                try printerr("Path points to unknown file type", .{});
                 return OpenProjectDirectoryError.UnknownAbs;
             }
         }
     } else {
         switch (try pathGetTypeCwd(path)) {
             .Directory => {
-                return try fs.cwd().openDir(path, .{.access_sub_paths = true, .iterate = true});
+                return .{
+                    .projectFileName = try directoryFindProjectFilename(alloc, path),
+                    .directoryPath = path,
+                    .pathWasFilepath = false};
             },
             .File => {
+                if (!mem.eql(u8, fs.path.extension(path), ".yyp")) {
+                    return OpenProjectDirectoryError.NotYyp;
+                }
                 if (fs.path.dirname(path)) |dirname| {
-                    return try fs.cwd().openDir(dirname, .{.access_sub_paths = true, .iterate = true});
+                    return .{
+                        .projectFileName = fs.path.basename(path),
+                        .directoryPath = dirname,
+                        .pathWasFilepath = true};
                 } else {
-                    try printerr("Couldn't get project directory from path", .{});
                     return OpenProjectDirectoryError.NoDirname;
                 }
             },
             .Unknown => {
-                try printerr("Path points to unknown file type", .{});
                 return OpenProjectDirectoryError.Unknown;
             }
         }
     }
+}
+
+fn directoryFindProjectFilename(alloc: Allocator, path: []const char) ![]const u8 {
+    var dir = try openDirRelOrAbs(path, .{.iterate = true, .access_sub_paths = false});
+    defer dir.close();
+    var walker = try dir.walk(alloc);
+    while (try walker.next()) |item| {
+        if (mem.eql(u8, fs.path.extension(item.basename), ".yyp")) {
+            return alloc.dupe(u8, item.basename);
+        }
+    }
+    return error.CouldntFindProjectFile;
+}
+
+fn openDirRelOrAbs(path: []const char, flags: fs.Dir.OpenOptions) !fs.Dir {
+    if (fs.path.isAbsolute(path)) {
+        return try fs.openDirAbsolute(path, flags);
+    } else {
+        return try fs.cwd().openDir(path, flags);
+    }
+}
+
+fn openFileRelOrAbs(path: []const char, flags: fs.File.OpenFlags) !fs.File {
+    if (fs.path.isAbsolute(path)) {
+        return try fs.openFileAbsolute(path, flags);
+    } else {
+        return try fs.cwd().openFile(path, flags);
+    }
+}
+
+fn openFileRelOrAbsReadToEndAllocDir(dir: fs.Dir, alloc: Allocator, path: []const char) ![:0]const u8 {
+    const f = try dir.openFile(path, .{});
+    defer f.close();
+    return f.readToEndAllocOptions(alloc, std.math.maxInt(usize), null, .of(u8), 0);
 }
 
 pub fn main() !void {
@@ -199,7 +254,7 @@ pub fn main() !void {
         };
     }
 
-    var wd = openProjectDirectory(projectPath) catch |err| {
+    const openProjectDirectoryResult = getProjectDirectory(alloc, projectPath) catch |err| {
         switch (err) {
             OpenProjectDirectoryError.NoDirname,
             OpenProjectDirectoryError.NoDirnameAbs => {
@@ -211,13 +266,52 @@ pub fn main() !void {
                 try printerr("Path points to unknown file/directory type", .{});
                 return;
             },
+            OpenProjectDirectoryError.NotYyp => {
+                try printerr("File pointed to by path was not a yyp", .{});
+                return;
+            },
             else => {
+                std.debug.print("{any}\n", .{err});
                 try printerr("Something went wrong while opening the project path", .{});
                 return;
             }
         }
     };
-    defer wd.close();
 
-    prints(projectPath);
+    const projDir = try openDirRelOrAbs(openProjectDirectoryResult.directoryPath, .{.iterate = true, .access_sub_paths = true});
+    const projectJson5 = try openFileRelOrAbsReadToEndAllocDir(projDir, alloc, openProjectDirectoryResult.projectFileName);
+    var root = std.mem.zeroes(zpl.AdtNode);
+    const zpl_alloc = c.zpl_heap_allocator();
+    switch (c.zpl_json_parse(@ptrCast(&root), @ptrCast(@constCast(projectJson5.ptr)), zpl_alloc)) {
+        c.ZPL_JSON_ERROR_NONE => {},
+        else => {
+            try printerr("Failed to parse json5 in .yyp", .{});
+            return;
+        }
+    }
+
+    var resourceMap = std.StringHashMapUnmanaged([]const u8).empty;
+    if (root.query_type("resources", .Array)) |resourcesNode| {
+        const resourcesHeader = resourcesNode.get_array_header();
+        for (0..@as(usize, @intCast(resourcesHeader.count))) |i| {
+            const resourceNode = resourcesNode.get_array_child(i);
+            if (resourceNode.query_type("id/path", .String)) |pathNode| {
+                const resourcePath = mem.span(pathNode.data.string);
+                if (fs.path.dirname(resourcePath)) |resourceDirname| {
+                    try resourceMap.put(
+                        alloc,
+                        try alloc.dupe(u8, resourceDirname),
+                        try alloc.dupe(u8, fs.path.basename(resourcePath)));
+                }
+            }
+        }
+    } else {
+        try printerr("Coldn't find resources array in Gamemaker project file", .{});
+        return;
+    }
+
+    var iter = resourceMap.iterator();
+    while (iter.next()) |item| {
+        std.debug.print("{s} : {s}\n", .{item.key_ptr.*, item.value_ptr.*});
+    }
 }

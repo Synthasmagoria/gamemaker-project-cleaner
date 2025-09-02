@@ -1,0 +1,3 @@
+#define ZPL_IMPLEMENTATION
+#define ZPL_PARSER_DISABLE_ANALYSIS
+#include "zpl.h"

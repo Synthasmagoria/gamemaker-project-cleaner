@@ -12,7 +12,7 @@ Example: gamemaker-project-cleaner C:/repos/gamemaker-project/
 
 ## Build instructions
 1) Install zig
-2) `zig build` in project root
+2) `zig build -Doptimize=ReleaseFast` in project root
 Program will appear zig-out/bin/
 
 ## Dependencies

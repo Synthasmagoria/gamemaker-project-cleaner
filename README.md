@@ -7,6 +7,7 @@ The tool will prompt you to confirm before deleting
 
 ## --- gamemaker-project-cleaner ---
 Usage: gamemaker-project-cleaner < project path >
+
 Example: gamemaker-project-cleaner C:/repos/gamemaker-project/
 
 ## Build instructions

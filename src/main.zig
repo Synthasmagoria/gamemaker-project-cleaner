@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const zpl = @import("zpl.zig");
 const fs = std.fs;
@@ -368,12 +369,17 @@ pub fn runProgram() !void {
             const basenameLowerNoExt = pathTruncateExtension(basenameLower);
             const extLower = fs.path.extension(basenameLower);
             const resourceNamesMatch = mem.eql(u8, basenameLowerNoExt, resourceNameLower);
-            const isGml = mem.eql(u8, extLower, ".gml");
-            const isPng = mem.eql(u8, extLower, ".png");
+            const isDeletableFileType = mem.eql(u8, extLower, ".png") or mem.eql(u8, extLower, ".yy");
             const isGmImageFileName = stringContainsOnly(basenameLowerNoExt, "abcdef0123456789-") and basenameLowerNoExt.len == 36;
             const isOutputTileset = mem.eql(u8, basenameLowerNoExt, "output_tileset");
-            if (item.kind == .file and !resourceNamesMatch and !isGml and !(isPng and isGmImageFileName) and !isOutputTileset) {
-                try deletionList.append(alloc, try fs.path.join(alloc, &.{dirName, item.basename}));
+            if (item.kind == .file and !resourceNamesMatch and isDeletableFileType and !isGmImageFileName and !isOutputTileset) {
+                if (builtin.os.tag == .windows) {
+                    const dirnameConverted = try alloc.alloc(u8, dirName.len);
+                    _ = std.mem.replace(u8, dirName, &.{fs.path.sep_posix}, &.{fs.path.sep_windows}, dirnameConverted);
+                    try deletionList.append(alloc, try fs.path.join(alloc, &.{dirnameConverted, item.basename}));
+                } else {
+                    try deletionList.append(alloc, try fs.path.join(alloc, &.{dirName, item.basename}));
+                }
                 deletionCount += 1;
             }
         }

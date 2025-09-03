@@ -31,6 +31,19 @@ fn handleCouldntAccessError(err: fs.Dir.AccessError, writer: *std.Io.Writer) !vo
     try writer.flush();
 }
 
+fn pathTruncateExtension(path: []const char) []const char {
+    return path[0..path.len - fs.path.extension(path).len];
+}
+
+fn stringContainsOnly(haystack: []const char, needles: []const char) bool {
+    for (haystack) |straw| {
+        if (!std.mem.containsAtLeast(u8, needles, 1, &.{straw})) {
+            return false;
+        }
+    }
+    return true;
+}
+
 const PathType = enum {
     File,
     Directory,
@@ -54,6 +67,21 @@ fn pathGetTypeAbs(path: []const char) !PathType {
     }
 
     return .Unknown;
+}
+
+fn stringLower(str: []char) void {
+    var i: usize = 0;
+    while (i < str.len) : (i += 1) {
+        if (str[i] >= 'A' and str[i] <= 'Z') {
+            str[i] += 'a' - 'A';
+        }
+    }
+}
+
+test stringLower {
+    var str = "HeLLO, I'm ///// kinda CaPITALIZed".*;
+    stringLower(@constCast(&str));
+    try std.testing.expectEqual("hello, i'm ///// kinda capitalized".*, str);
 }
 
 fn pathGetTypeCwd(path: []const char) !PathType {
@@ -212,6 +240,20 @@ fn openFileRelOrAbsReadToEndAllocDir(dir: fs.Dir, alloc: Allocator, path: []cons
 
 pub fn main() !void {
     init();
+    runProgram() catch |err| {
+        switch (err) {
+            error.OutOfMemory => {
+                try printerr("Out of memory", .{});
+                return;
+            },
+            else => {
+                return err;
+            },
+        }
+    };
+}
+
+pub fn runProgram() !void {
     var arenaAlloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arenaAlloc.deinit();
     const alloc = arenaAlloc.allocator();
@@ -298,10 +340,12 @@ pub fn main() !void {
             if (resourceNode.query_type("id/path", .String)) |pathNode| {
                 const resourcePath = mem.span(pathNode.data.string);
                 if (fs.path.dirname(resourcePath)) |resourceDirname| {
+                    const resourceNameLower = try alloc.dupe(u8, fs.path.basename(resourcePath));
+                    stringLower(@constCast(resourceNameLower));
                     try resourceMap.put(
                         alloc,
                         try alloc.dupe(u8, resourceDirname),
-                        try alloc.dupe(u8, fs.path.basename(resourcePath)));
+                        pathTruncateExtension(resourceNameLower));
                 }
             }
         }
@@ -311,7 +355,61 @@ pub fn main() !void {
     }
 
     var iter = resourceMap.iterator();
-    while (iter.next()) |item| {
-        std.debug.print("{s} : {s}\n", .{item.key_ptr.*, item.value_ptr.*});
+    var deletionCount: usize = 0;
+    var deletionList = try std.ArrayList([]const u8).initCapacity(alloc, 1000);
+    while (iter.next()) |resource| {
+        const dirName = resource.key_ptr.*;
+        const resourceNameLower = resource.value_ptr.*;
+        var dir = try projDir.openDir(dirName, .{.access_sub_paths = false, .iterate = true});
+        var walker = try dir.walk(alloc);
+        while (try walker.next()) |item| {
+            const basenameLower = try alloc.dupe(u8, item.basename);
+            stringLower(@constCast(basenameLower));
+            const basenameLowerNoExt = pathTruncateExtension(basenameLower);
+            const extLower = fs.path.extension(basenameLower);
+            const resourceNamesMatch = mem.eql(u8, basenameLowerNoExt, resourceNameLower);
+            const isGml = mem.eql(u8, extLower, ".gml");
+            const isPng = mem.eql(u8, extLower, ".png");
+            const isGmImageFileName = stringContainsOnly(basenameLowerNoExt, "abcdef0123456789-") and basenameLowerNoExt.len == 36;
+            const isOutputTileset = mem.eql(u8, basenameLowerNoExt, "output_tileset");
+            if (item.kind == .file and !resourceNamesMatch and !isGml and !(isPng and isGmImageFileName) and !isOutputTileset) {
+                try deletionList.append(alloc, try fs.path.join(alloc, &.{dirName, item.basename}));
+                deletionCount += 1;
+            }
+        }
+    }
+
+    for (deletionList.items) |item| {
+        try printinfo("Would delete '{s}'", .{item});
+    }
+
+    try printinfo("Will delete a total of {d} files", .{deletionCount});
+    try stdout.print("Continue (y/n):", .{});
+    try stdout.flush();
+
+    var input: [1]char = .{0};
+    stdin.readSliceAll(&input) catch {
+        try printerr("Aborting...", .{});
+        return;
+    };
+
+    stringLower(&input);
+    switch (input[0]) {
+        'y' => {},
+        'n' => {
+            try printinfo("Aborting...", .{});
+            return;
+        },
+        else => {
+            try printerr("Invalid input. Aborting...", .{});
+            return;
+        }
+    }
+
+    for (deletionList.items) |item| {
+        projDir.deleteFile(item) catch |err| {
+            try stderr.print("{any}: '{s}'\n", .{err, item});
+            try stderr.flush();
+        };
     }
 }

@@ -15,6 +15,13 @@ Example: gamemaker-project-cleaner C:/repos/gamemaker-project/
 2) `zig build -Doptimize=ReleaseFast` in project root
 Program will appear zig-out/bin/
 
+## Improvement
+Does the tool delete too little?
+
+Does the tool delet too much?
+
+Send me a dm on discord or create an issue here.
+
 ## Dependencies
 This tool uses ZPL for parsing JSON5.
 
